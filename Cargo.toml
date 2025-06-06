@@ -11,7 +11,7 @@ documentation = "https://github.com/awxkee/novtb"
 categories = ["concurrency"]
 homepage = "https://github.com/awxkee/novtb"
 repository = "https://github.com/awxkee/novtb.git"
-exclude = ["*.jpg", "./assets/*", "*.png", ".gitignore"]
+exclude = ["*.jpg", "./assets/*", "*.png", ".gitignore", ".github/*"]
 rust-version = "1.85.0"
 
 [dependencies]
