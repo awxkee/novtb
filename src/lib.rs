@@ -26,6 +26,7 @@
  * // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+#![deny(clippy::float_arithmetic)]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -183,18 +184,25 @@ pub trait ParallelZonedIterator: Sized + Send {
         F: 'scope + Fn(usize, Self::Item) + Send + Sync;
 }
 
-fn lcd(size: usize, amount: usize) -> usize {
-    let mut n_threads = amount;
-    let mut group_size = size / n_threads;
-    if group_size != 0 {
-        return group_size;
-    }
-    while group_size == 0 && n_threads > 1 {
-        group_size = size / n_threads;
+fn odd_rounding_div_ceil(rows_to_execute: usize, threads: usize, chunk_size: usize) -> usize {
+    assert!(
+        rows_to_execute > 0 && threads > 0 && chunk_size > 0,
+        "All values must be not null"
+    );
+
+    let rows_per_thread = rows_to_execute.div_ceil(threads);
+
+    let mut group_size = rows_per_thread.div_ceil(chunk_size) * chunk_size;
+
+    let mut n_threads = threads;
+    while group_size == 0 && n_threads > 2 {
         n_threads -= 1;
+        let rows_per_thread = rows_to_execute.div_ceil(threads);
+        group_size = rows_per_thread.div_ceil(chunk_size) * chunk_size;
     }
+
     if group_size == 0 {
-        return size;
+        return rows_to_execute;
     }
     group_size
 }
@@ -218,7 +226,7 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksExactMut<'data, T> {
 
         let rows_to_execute = total_chunks * chunk_size;
 
-        let group_size = lcd(rows_to_execute, pool.amount);
+        let group_size = odd_rounding_div_ceil(rows_to_execute, pool.amount, chunk_size);
         if group_size == rows_to_execute {
             for chunk in slice.chunks_exact_mut(chunk_size) {
                 f(chunk);
@@ -231,7 +239,7 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksExactMut<'data, T> {
             let cores = core_affinity::get_core_ids().unwrap_or_default();
             let cores_len = cores.len().max(1);
 
-            let mut chunks = slice.chunks_exact_mut(group_size);
+            let mut chunks = slice.chunks_mut(group_size);
             let first_group = chunks.next();
 
             for chunk in chunks {
@@ -274,7 +282,7 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksExactMut<'data, T> {
 
         let rows_to_execute = total_chunks * chunk_size;
 
-        let group_size = lcd(rows_to_execute, thread_pool.amount);
+        let group_size = odd_rounding_div_ceil(rows_to_execute, thread_pool.amount, chunk_size);
         if group_size == rows_to_execute {
             for (i, chunk) in slice.chunks_exact_mut(chunk_size).enumerate() {
                 f(i, chunk);
@@ -287,7 +295,7 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksExactMut<'data, T> {
             let cores = core_affinity::get_core_ids().unwrap_or_default();
             let cores_len = cores.len().max(1);
 
-            let mut chunks = slice.chunks_exact_mut(group_size);
+            let mut chunks = slice.chunks_mut(group_size);
             let first_group = chunks.next();
 
             for (z, chunk) in chunks.enumerate() {
@@ -335,7 +343,7 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksMut<'data, T> {
 
         let rows_to_execute = total_chunks * chunk_size;
 
-        let group_size = lcd(rows_to_execute, pool.amount);
+        let group_size = odd_rounding_div_ceil(rows_to_execute, pool.amount, chunk_size);
         if group_size == rows_to_execute {
             for chunk in slice.chunks_mut(chunk_size) {
                 f(chunk);
@@ -391,7 +399,7 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksMut<'data, T> {
 
         let rows_to_execute = total_chunks * chunk_size;
 
-        let group_size = lcd(rows_to_execute, thread_pool.amount);
+        let group_size = odd_rounding_div_ceil(rows_to_execute, thread_pool.amount, chunk_size);
         if group_size == rows_to_execute {
             for (i, chunk) in slice.chunks_mut(chunk_size).enumerate() {
                 f(i, chunk);
