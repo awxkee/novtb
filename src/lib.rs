@@ -57,12 +57,10 @@ impl ThreadPool {
             let cores_len = cores.len().max(1);
 
             for i in 1..self.amount {
-                let offset = CORE_RING_INDEX.fetch_add(self.amount, Ordering::Relaxed);
+                let offset = CORE_RING_INDEX.fetch_add(1, Ordering::Relaxed);
 
                 let job = Arc::clone(&job);
-                let core = cores
-                    .get(((i - 1).wrapping_add(offset)) % cores_len)
-                    .cloned();
+                let core = cores.get(offset % cores_len).cloned();
 
                 let ci = i - 1;
 
@@ -185,6 +183,22 @@ pub trait ParallelZonedIterator: Sized + Send {
         F: 'scope + Fn(usize, Self::Item) + Send + Sync;
 }
 
+fn lcd(size: usize, amount: usize) -> usize {
+    let mut n_threads = amount;
+    let mut group_size = size / n_threads;
+    if group_size != 0 {
+        return group_size;
+    }
+    while group_size == 0 && n_threads > 1 {
+        group_size = size / n_threads;
+        n_threads -= 1;
+    }
+    if group_size == 0 {
+        return size;
+    }
+    group_size
+}
+
 impl<'data, T: Send> ParallelZonedIterator for ChunksExactMut<'data, T> {
     type Item = &'data mut [T];
 
@@ -204,8 +218,8 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksExactMut<'data, T> {
 
         let rows_to_execute = total_chunks * chunk_size;
 
-        let group_size = (rows_to_execute / pool.amount).max(1);
-        if group_size <= 1 {
+        let group_size = lcd(rows_to_execute, pool.amount);
+        if group_size == rows_to_execute {
             for chunk in slice.chunks_exact_mut(chunk_size) {
                 f(chunk);
             }
@@ -220,11 +234,11 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksExactMut<'data, T> {
             let mut chunks = slice.chunks_exact_mut(group_size);
             let first_group = chunks.next();
 
-            for (i, chunk) in chunks.enumerate() {
-                let offset = CORE_RING_INDEX.fetch_add(pool.amount, Ordering::Relaxed);
+            for chunk in chunks {
+                let offset = CORE_RING_INDEX.fetch_add(1, Ordering::Relaxed);
 
                 let job = Arc::clone(&job);
-                let core = cores.get((i.wrapping_add(offset)) % cores_len).cloned();
+                let core = cores.get(offset % cores_len).cloned();
 
                 s.spawn(move || {
                     if let Some(core_id) = core {
@@ -260,8 +274,8 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksExactMut<'data, T> {
 
         let rows_to_execute = total_chunks * chunk_size;
 
-        let group_size = (rows_to_execute / thread_pool.amount).max(1);
-        if group_size <= 1 {
+        let group_size = lcd(rows_to_execute, thread_pool.amount);
+        if group_size == rows_to_execute {
             for (i, chunk) in slice.chunks_exact_mut(chunk_size).enumerate() {
                 f(i, chunk);
             }
@@ -277,10 +291,10 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksExactMut<'data, T> {
             let first_group = chunks.next();
 
             for (z, chunk) in chunks.enumerate() {
-                let offset = CORE_RING_INDEX.fetch_add(thread_pool.amount, Ordering::Relaxed);
+                let offset = CORE_RING_INDEX.fetch_add(1, Ordering::Relaxed);
 
                 let job = Arc::clone(&job);
-                let core = cores.get((z.wrapping_add(offset)) % cores_len).cloned();
+                let core = cores.get(offset % cores_len).cloned();
 
                 s.spawn(move || {
                     if let Some(core_id) = core {
@@ -321,8 +335,8 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksMut<'data, T> {
 
         let rows_to_execute = total_chunks * chunk_size;
 
-        let group_size = (rows_to_execute / pool.amount).max(1);
-        if group_size <= 1 {
+        let group_size = lcd(rows_to_execute, pool.amount);
+        if group_size == rows_to_execute {
             for chunk in slice.chunks_mut(chunk_size) {
                 f(chunk);
             }
@@ -337,11 +351,11 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksMut<'data, T> {
             let mut chunks = slice.chunks_mut(group_size);
             let first_group = chunks.next();
 
-            for (i, chunk) in chunks.enumerate() {
-                let offset = CORE_RING_INDEX.fetch_add(pool.amount, Ordering::Relaxed);
+            for chunk in chunks {
+                let offset = CORE_RING_INDEX.fetch_add(1, Ordering::Relaxed);
 
                 let job = Arc::clone(&job);
-                let core = cores.get((i.wrapping_add(offset)) % cores_len).cloned();
+                let core = cores.get(offset % cores_len).cloned();
 
                 s.spawn(move || {
                     if let Some(core_id) = core {
@@ -377,8 +391,8 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksMut<'data, T> {
 
         let rows_to_execute = total_chunks * chunk_size;
 
-        let group_size = (rows_to_execute / thread_pool.amount).max(1);
-        if group_size <= 1 {
+        let group_size = lcd(rows_to_execute, thread_pool.amount);
+        if group_size == rows_to_execute {
             for (i, chunk) in slice.chunks_mut(chunk_size).enumerate() {
                 f(i, chunk);
             }
@@ -394,7 +408,7 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksMut<'data, T> {
             let first_group = chunks.next();
 
             for (z, chunk) in chunks.enumerate() {
-                let offset = CORE_RING_INDEX.fetch_add(thread_pool.amount, Ordering::Relaxed);
+                let offset = CORE_RING_INDEX.fetch_add(1, Ordering::Relaxed);
 
                 let job = Arc::clone(&job);
                 let core = cores.get((z.wrapping_add(offset)) % cores_len).cloned();
