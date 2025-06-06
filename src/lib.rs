@@ -62,14 +62,12 @@ impl ThreadPool {
 
                 let job = Arc::clone(&job);
                 let core = cores.get(offset % cores_len).cloned();
-
-                let ci = i - 1;
-
+                
                 s.spawn(move || {
                     if let Some(core_id) = core {
                         core_affinity::set_for_current(core_id);
                     }
-                    job(ci);
+                    job(i);
                 });
             }
 
