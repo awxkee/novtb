@@ -1,0 +1,24 @@
+[package]
+name = "novtb"
+version = "0.1.0"
+edition = "2024"
+description = "Simple Zoned Data-Parallelism with Core Affinity"
+readme = "./README.md"
+keywords = ["thread", "affinity"]
+license = "BSD-3-Clause OR Apache-2.0"
+authors = ["Radzivon Bartoshyk"]
+documentation = "https://github.com/awxkee/novtb"
+categories = ["concurrency"]
+homepage = "https://github.com/awxkee/novtb"
+repository = "https://github.com/awxkee/novtb.git"
+exclude = ["*.jpg", "./assets/*", "*.png", ".gitignore"]
+rust-version = "1.85.0"
+
+[dependencies]
+core_affinity = "0.8"
+
+[package.metadata.docs.rs]
+# To build locally:
+# RUSTDOCFLAGS="--cfg docsrs" cargo +nightly doc --all-features --no-deps --open --manifest-path ./Cargo.toml
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
