@@ -204,7 +204,13 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksExactMut<'data, T> {
 
         let rows_to_execute = total_chunks * chunk_size;
 
-        let group_size = rows_to_execute / pool.amount;
+        let group_size = (rows_to_execute / pool.amount).max(1);
+        if group_size <= 1 {
+            for chunk in slice.chunks_exact_mut(chunk_size) {
+                f(chunk);
+            }
+            return;
+        }
 
         thread::scope(|s| {
             let job = Arc::new(f);
@@ -254,7 +260,13 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksExactMut<'data, T> {
 
         let rows_to_execute = total_chunks * chunk_size;
 
-        let group_size = rows_to_execute / thread_pool.amount;
+        let group_size = (rows_to_execute / thread_pool.amount).max(1);
+        if group_size <= 1 {
+            for (i, chunk) in slice.chunks_exact_mut(chunk_size).enumerate() {
+                f(i, chunk);
+            }
+            return;
+        }
 
         thread::scope(|s| {
             let job = Arc::new(f);
@@ -309,7 +321,13 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksMut<'data, T> {
 
         let rows_to_execute = total_chunks * chunk_size;
 
-        let group_size = rows_to_execute / pool.amount;
+        let group_size = (rows_to_execute / pool.amount).max(1);
+        if group_size <= 1 {
+            for chunk in slice.chunks_mut(chunk_size) {
+                f(chunk);
+            }
+            return;
+        }
 
         thread::scope(|s| {
             let job = Arc::new(f);
@@ -359,7 +377,13 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksMut<'data, T> {
 
         let rows_to_execute = total_chunks * chunk_size;
 
-        let group_size = rows_to_execute / thread_pool.amount;
+        let group_size = (rows_to_execute / thread_pool.amount).max(1);
+        if group_size <= 1 {
+            for (i, chunk) in slice.chunks_mut(chunk_size).enumerate() {
+                f(i, chunk);
+            }
+            return;
+        }
 
         thread::scope(|s| {
             let job = Arc::new(f);
