@@ -62,7 +62,7 @@ impl ThreadPool {
 
                 let job = Arc::clone(&job);
                 let core = cores.get(offset % cores_len).cloned();
-                
+
                 s.spawn(move || {
                     if let Some(core_id) = core {
                         core_affinity::set_for_current(core_id);
@@ -296,21 +296,32 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksExactMut<'data, T> {
             let mut chunks = slice.chunks_mut(group_size);
             let first_group = chunks.next();
 
-            for (z, chunk) in chunks.enumerate() {
+            let mut base_offset = if let Some(first_group) = &first_group {
+                first_group.len() / chunk_size
+            } else {
+                0
+            };
+
+            for chunk in chunks {
                 let offset = CORE_RING_INDEX.fetch_add(1, Ordering::Relaxed);
 
                 let job = Arc::clone(&job);
                 let core = cores.get(offset % cores_len).cloned();
 
+                let local_chunk_size = chunk.len() / chunk_size;
+
+                let copied_base_offset = base_offset;
+
                 s.spawn(move || {
                     if let Some(core_id) = core {
                         core_affinity::set_for_current(core_id);
                     }
-                    let base_id = z + 1;
                     for (i, chunk) in chunk.chunks_exact_mut(chunk_size).enumerate() {
-                        job(base_id + i, chunk);
+                        job(copied_base_offset + i, chunk);
                     }
                 });
+
+                base_offset += local_chunk_size;
             }
 
             if let Some(first_group) = first_group {
@@ -413,21 +424,31 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksMut<'data, T> {
             let mut chunks = slice.chunks_mut(group_size);
             let first_group = chunks.next();
 
-            for (z, chunk) in chunks.enumerate() {
+            let mut base_offset = if let Some(first_group) = &first_group {
+                first_group.len() / chunk_size
+            } else {
+                0
+            };
+
+            for chunk in chunks {
                 let offset = CORE_RING_INDEX.fetch_add(1, Ordering::Relaxed);
 
                 let job = Arc::clone(&job);
-                let core = cores.get((z.wrapping_add(offset)) % cores_len).cloned();
+                let core = cores.get(offset % cores_len).cloned();
+                let local_chunk_size = chunk.len() / chunk_size;
+
+                let copied_base_offset = base_offset;
 
                 s.spawn(move || {
                     if let Some(core_id) = core {
                         core_affinity::set_for_current(core_id);
                     }
-                    let base_id = z + 1;
                     for (i, chunk) in chunk.chunks_mut(chunk_size).enumerate() {
-                        job(base_id + i, chunk);
+                        job(copied_base_offset + i, chunk);
                     }
                 });
+
+                base_offset += local_chunk_size;
             }
 
             if let Some(first_group) = first_group {
