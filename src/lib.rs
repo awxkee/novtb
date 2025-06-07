@@ -212,6 +212,9 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksExactMut<'data, T> {
     where
         F: 'scope + Fn(Self::Item) + Send + Sync,
     {
+        if self.slice.is_empty() {
+            return;
+        }
         if pool.amount <= 1 {
             for chunk in self.slice.chunks_exact_mut(self.chunk_size) {
                 f(chunk);
@@ -220,7 +223,7 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksExactMut<'data, T> {
         }
         let chunk_size = self.chunk_size;
         let slice = std::mem::take(&mut self.slice); // take ownership
-        let total_chunks = slice.len() / chunk_size;
+        let total_chunks = (slice.len() / chunk_size).max(1);
 
         let rows_to_execute = total_chunks * chunk_size;
 
@@ -268,6 +271,9 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksExactMut<'data, T> {
     where
         F: 'scope + Fn(usize, Self::Item) + Send + Sync,
     {
+        if self.slice.is_empty() {
+            return;
+        }
         if thread_pool.amount <= 1 {
             for (i, chunk) in self.slice.chunks_exact_mut(self.chunk_size).enumerate() {
                 f(i, chunk);
@@ -276,7 +282,7 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksExactMut<'data, T> {
         }
         let chunk_size = self.chunk_size;
         let slice = std::mem::take(&mut self.slice); // take ownership
-        let total_chunks = slice.len() / chunk_size;
+        let total_chunks = (slice.len() / chunk_size).max(1);
 
         let rows_to_execute = total_chunks * chunk_size;
 
@@ -340,6 +346,9 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksMut<'data, T> {
     where
         F: 'scope + Fn(Self::Item) + Send + Sync,
     {
+        if self.slice.is_empty() {
+            return;
+        }
         if pool.amount <= 1 {
             for chunk in self.slice.chunks_mut(self.chunk_size) {
                 f(chunk);
@@ -348,7 +357,7 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksMut<'data, T> {
         }
         let chunk_size = self.chunk_size;
         let slice = std::mem::take(&mut self.slice); // take ownership
-        let total_chunks = slice.len() / chunk_size;
+        let total_chunks = (slice.len() / chunk_size).max(1);
 
         let rows_to_execute = total_chunks * chunk_size;
 
@@ -396,6 +405,9 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksMut<'data, T> {
     where
         F: 'scope + Fn(usize, Self::Item) + Send + Sync,
     {
+        if self.slice.is_empty() {
+            return;
+        }
         if thread_pool.amount <= 1 {
             for (i, chunk) in self.slice.chunks_mut(self.chunk_size).enumerate() {
                 f(i, chunk);
@@ -404,7 +416,7 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksMut<'data, T> {
         }
         let chunk_size = self.chunk_size;
         let slice = std::mem::take(&mut self.slice); // take ownership
-        let total_chunks = slice.len() / chunk_size;
+        let total_chunks = (slice.len() / chunk_size).max(1);
 
         let rows_to_execute = total_chunks * chunk_size;
 
