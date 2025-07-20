@@ -1,13 +1,19 @@
-# Simple Zoned Data-Parallelism with Core Affinity
+# novtb – Simple Zoned Data-Parallelism with Core Affinity
 
-Library does simple brute-force region data-parallelism with core pinning. 
+novtb provides a lightweight, brute-force data-parallel execution model with support for core pinning (CPU affinity). It's useful for workloads where threads should be pinned to specific cores for improved cache locality or performance consistency.
+
+# Features
+
+- Zone-based parallel iteration over chunked data
+- Explicit thread pool with core affinity
+- Simple API without complex task graphs or scheduling overhead
 
 # Some examples
 
 ```rust
 let pool = novtb::ThreadPool::new(thread_count as usize);
 pool.parallel_for(|thread_index| {
-    // some heavy work
+    // Perform thread-specific heavy work here
 );
 ```
 
@@ -15,7 +21,7 @@ pool.parallel_for(|thread_index| {
 let pool = novtb::ThreadPool::new(thread_count as usize);
 dst.tb_par_chunks_mut(dst_stride as usize * tile_size)
     .for_each_enumerated(&pool, |cy, dst_rows| {
-        // some heavy work
+    // Process a tile at row 'cy' in 'dst_rows'
     });
 ```
 
