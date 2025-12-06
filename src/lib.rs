@@ -44,6 +44,10 @@ impl ThreadPool {
         }
     }
 
+    pub fn thread_count(&self) -> usize {
+        self.amount
+    }
+
     pub fn parallel_for<'scope, F>(&self, job: F)
     where
         F: 'scope + Fn(usize) + Send + Sync,
