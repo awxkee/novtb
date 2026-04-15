@@ -27,9 +27,15 @@
  * // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 #![deny(clippy::float_arithmetic)]
+
+mod zip;
+mod zip_exact;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
+pub use zip::{ZipChunks, ZipChunksExact};
+pub use zip_exact::{ZipChunksExactMut, ZipChunksExactMutExact};
 
 static CORE_RING_INDEX: AtomicUsize = AtomicUsize::new(0);
 
