@@ -100,6 +100,17 @@ impl<'data, T: Send> ChunksExactMut<'data, T> {
         }
     }
 
+    pub fn take(mut self, n: usize) -> Self {
+        let max_len = (self.chunk_size * n).min(self.slice.len());
+        // re-split so rem is correctly updated to whatever is left after truncation
+        let (slice, rem) = self.slice.split_at_mut(max_len);
+        // if there was already a remainder from construction, it stays in self.rem
+        // but the new truncated tail becomes the new remainder
+        self.slice = slice;
+        self.rem = rem;
+        self
+    }
+
     /// Return the remainder of the original slice that is not going to be
     /// returned by the iterator. The returned slice has at most `chunk_size-1`
     /// elements.
@@ -141,6 +152,12 @@ pub struct ChunksMut<'data, T: Send> {
 impl<'data, T: Send> ChunksMut<'data, T> {
     pub fn new(chunk_size: usize, slice: &'data mut [T]) -> Self {
         Self { chunk_size, slice }
+    }
+
+    pub fn take(mut self, n: usize) -> Self {
+        let max_len = (self.chunk_size * n).min(self.slice.len());
+        self.slice = &mut self.slice[..max_len];
+        self
     }
 }
 
