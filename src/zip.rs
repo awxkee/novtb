@@ -81,20 +81,19 @@ where
             return;
         }
 
-        // Collect the companion iterator so we can slice it per group.
-        let others: Vec<I::Item> = self.other.collect();
         let chunk_size = self.inner.chunk_size;
         let slice = std::mem::take(&mut self.inner.slice);
+        let total_chunks = (slice.len() / chunk_size).min(self.other.size_hint().0);
 
-        // Zip-truncate: honor whichever side is shorter.
-        let total_chunks = (slice.len() / chunk_size).min(others.len());
         if total_chunks == 0 {
             return;
         }
+
         let slice = &mut slice[..total_chunks * chunk_size];
 
+        // No threading needed — consume the iterator directly, no allocation.
         if pool.amount <= 1 {
-            for (chunk, item) in slice.chunks_mut(chunk_size).zip(others) {
+            for (chunk, item) in slice.chunks_mut(chunk_size).zip(&mut self.other) {
                 f((chunk, item));
             }
             return;
@@ -103,14 +102,16 @@ where
         let rows_to_execute = total_chunks * chunk_size;
         let group_size = odd_rounding_div_ceil(rows_to_execute, pool.amount, chunk_size);
 
+        // Not enough chunks to distribute across threads — also no allocation.
         if group_size == rows_to_execute {
-            for (chunk, item) in slice.chunks_mut(chunk_size).zip(others) {
+            for (chunk, item) in slice.chunks_mut(chunk_size).zip(&mut self.other) {
                 f((chunk, item));
             }
             return;
         }
 
-        // Split `others` into same-sized groups as the slice groups.
+        // Only here do we pay for the allocation — threading is confirmed needed.
+        let others: Vec<I::Item> = self.other.take(total_chunks).collect();
         let chunks_per_group = group_size / chunk_size;
 
         thread::scope(|s| {
@@ -171,17 +172,23 @@ where
         if self.inner.slice.is_empty() {
             return;
         }
-        let others: Vec<I::Item> = self.other.collect();
+
         let chunk_size = self.inner.chunk_size;
         let slice = std::mem::take(&mut self.inner.slice);
-        let total_chunks = (slice.len() / chunk_size).min(others.len());
+        let total_chunks = (slice.len() / chunk_size).min(self.other.size_hint().0);
+
         if total_chunks == 0 {
             return;
         }
+
         let slice = &mut slice[..total_chunks * chunk_size];
 
         if pool.amount <= 1 {
-            for (i, (chunk, item)) in slice.chunks_mut(chunk_size).zip(others).enumerate() {
+            for (i, (chunk, item)) in slice
+                .chunks_mut(chunk_size)
+                .zip(&mut self.other)
+                .enumerate()
+            {
                 f(i, (chunk, item));
             }
             return;
@@ -191,14 +198,18 @@ where
         let group_size = odd_rounding_div_ceil(rows_to_execute, pool.amount, chunk_size);
 
         if group_size == rows_to_execute {
-            for (i, (chunk, item)) in slice.chunks_mut(chunk_size).zip(others).enumerate() {
+            for (i, (chunk, item)) in slice
+                .chunks_mut(chunk_size)
+                .zip(&mut self.other)
+                .enumerate()
+            {
                 f(i, (chunk, item));
             }
             return;
         }
 
+        let others: Vec<I::Item> = self.other.take(total_chunks).collect();
         let chunks_per_group = group_size / chunk_size;
-
         thread::scope(|s| {
             let job = Arc::new(f);
             let cores = core_affinity::get_core_ids().unwrap_or_default();

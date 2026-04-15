@@ -117,6 +117,12 @@ impl<'data, T: Send> ChunksExactMut<'data, T> {
         self
     }
 
+    pub fn skip(mut self, n: usize) -> Self {
+        let skip_len = (self.chunk_size * n).min(self.slice.len());
+        self.slice = &mut self.slice[skip_len..];
+        self
+    }
+
     /// Return the remainder of the original slice that is not going to be
     /// returned by the iterator. The returned slice has at most `chunk_size-1`
     /// elements.
@@ -163,6 +169,12 @@ impl<'data, T: Send> ChunksMut<'data, T> {
     pub fn take(mut self, n: usize) -> Self {
         let max_len = (self.chunk_size * n).min(self.slice.len());
         self.slice = &mut self.slice[..max_len];
+        self
+    }
+
+    pub fn skip(mut self, n: usize) -> Self {
+        let skip_len = (self.chunk_size * n).min(self.slice.len());
+        self.slice = &mut self.slice[skip_len..];
         self
     }
 }
