@@ -36,7 +36,7 @@ jobs:
     name: Clippy
     strategy:
       matrix:
-        os: [ ubuntu-latest, macos-latest ]
+        os: [ ubuntu-latest, ubuntu-24.04-arm ]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
