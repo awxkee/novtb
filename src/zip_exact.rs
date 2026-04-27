@@ -105,20 +105,27 @@ where
 
         let others: Vec<I::Item> = self.other.take(total_chunks).collect();
 
+        let first_group_len = group_size.min(slice.len());
+        let first_n = first_group_len / chunk_size;
+        // Pre-split before thread::scope: first_items owns [0..first_n],
+        // rest_items owns [first_n..]. Both are independent owned Vecs so
+        // the calling thread and worker threads consume disjoint item ranges
+        // regardless of scheduling order.
+        let mut others = others;
+        let rest_items = others.split_off(first_n);
+        let first_items = others;
+
+        let (first_group, remaining) = slice.split_at_mut(first_group_len);
+
         thread::scope(|s| {
             let job = Arc::new(f);
             let cores = core_affinity::get_core_ids().unwrap_or_default();
             let cores_len = cores.len().max(1);
 
-            let mut others_iter = others.into_iter();
-
-            let first_group_len = group_size.min(slice.len());
-            let (first_group, remaining) = slice.split_at_mut(first_group_len);
-
-            let first_n = first_group_len / chunk_size;
+            let mut rest_iter = rest_items.into_iter();
             for slice_group in remaining.chunks_mut(group_size) {
                 let n = slice_group.len() / chunk_size;
-                let group_items: Vec<I::Item> = others_iter.by_ref().take(n).collect();
+                let group_items: Vec<I::Item> = rest_iter.by_ref().take(n).collect();
 
                 let offset = CORE_RING_INDEX.fetch_add(1, Ordering::Relaxed);
                 let job = Arc::clone(&job);
@@ -134,10 +141,7 @@ where
                 });
             }
 
-            for (chunk, item) in first_group
-                .chunks_exact_mut(chunk_size)
-                .zip(others_iter.by_ref().take(first_n))
-            {
+            for (chunk, item) in first_group.chunks_exact_mut(chunk_size).zip(first_items) {
                 job((chunk, item));
             }
         });
@@ -188,22 +192,26 @@ where
 
         let others: Vec<I::Item> = self.other.take(total_chunks).collect();
 
+        let first_group_len = group_size.min(slice.len());
+        let first_n = first_group_len / chunk_size;
+        let mut others = others;
+        let rest_items = others.split_off(first_n);
+        let first_items = others;
+
+        let (first_group, remaining) = slice.split_at_mut(first_group_len);
+
         thread::scope(|s| {
             let job = Arc::new(f);
             let cores = core_affinity::get_core_ids().unwrap_or_default();
             let cores_len = cores.len().max(1);
 
-            let mut others_iter = others.into_iter();
-
-            let first_group_len = group_size.min(slice.len());
-            let (first_group, remaining) = slice.split_at_mut(first_group_len);
-
-            let first_n = first_group_len / chunk_size;
+            // Workers take indices [first_n..total], base_offset starts at first_n.
+            let mut rest_iter = rest_items.into_iter();
             let mut base_offset = first_n;
 
             for slice_group in remaining.chunks_mut(group_size) {
                 let n = slice_group.len() / chunk_size;
-                let group_items: Vec<I::Item> = others_iter.by_ref().take(n).collect();
+                let group_items: Vec<I::Item> = rest_iter.by_ref().take(n).collect();
 
                 let offset = CORE_RING_INDEX.fetch_add(1, Ordering::Relaxed);
                 let job = Arc::clone(&job);
@@ -228,7 +236,7 @@ where
 
             for (i, (chunk, item)) in first_group
                 .chunks_exact_mut(chunk_size)
-                .zip(others_iter.by_ref().take(first_n))
+                .zip(first_items)
                 .enumerate()
             {
                 job(i, (chunk, item));
