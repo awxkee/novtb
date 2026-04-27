@@ -80,7 +80,6 @@ where
         let slice = std::mem::take(&mut self.inner.slice);
 
         let total_chunks = (slice.len() / chunk_size).min(self.other.size_hint().0);
-
         if total_chunks == 0 {
             return;
         }
@@ -105,7 +104,6 @@ where
         }
 
         let others: Vec<I::Item> = self.other.take(total_chunks).collect();
-        let chunks_per_group = group_size / chunk_size;
 
         thread::scope(|s| {
             let job = Arc::new(f);
@@ -113,24 +111,15 @@ where
             let cores_len = cores.len().max(1);
 
             let mut others_iter = others.into_iter();
-            let mut grouped_others: Vec<Vec<I::Item>> = Vec::new();
-            loop {
-                let group: Vec<I::Item> = others_iter.by_ref().take(chunks_per_group).collect();
-                if group.is_empty() {
-                    break;
-                }
-                grouped_others.push(group);
-            }
 
-            let mut slice_chunks = slice.chunks_mut(group_size);
-            let first_slice_group = slice_chunks.next();
-            let first_others_group = if !grouped_others.is_empty() {
-                Some(grouped_others.swap_remove(0))
-            } else {
-                None
-            };
+            let first_group_len = group_size.min(slice.len());
+            let (first_group, remaining) = slice.split_at_mut(first_group_len);
 
-            for (slice_group, others_group) in slice_chunks.zip(grouped_others) {
+            let first_n = first_group_len / chunk_size;
+            for slice_group in remaining.chunks_mut(group_size) {
+                let n = slice_group.len() / chunk_size;
+                let group_items: Vec<I::Item> = others_iter.by_ref().take(n).collect();
+
                 let offset = CORE_RING_INDEX.fetch_add(1, Ordering::Relaxed);
                 let job = Arc::clone(&job);
                 let core = cores.get(offset % cores_len).cloned();
@@ -139,17 +128,17 @@ where
                     if let Some(core_id) = core {
                         core_affinity::set_for_current(core_id);
                     }
-                    for (chunk, item) in slice_group.chunks_exact_mut(chunk_size).zip(others_group)
-                    {
+                    for (chunk, item) in slice_group.chunks_exact_mut(chunk_size).zip(group_items) {
                         job((chunk, item));
                     }
                 });
             }
 
-            if let (Some(sg), Some(og)) = (first_slice_group, first_others_group) {
-                for (chunk, item) in sg.chunks_exact_mut(chunk_size).zip(og) {
-                    job((chunk, item));
-                }
+            for (chunk, item) in first_group
+                .chunks_exact_mut(chunk_size)
+                .zip(others_iter.by_ref().take(first_n))
+            {
+                job((chunk, item));
             }
         });
     }
@@ -166,7 +155,6 @@ where
         let slice = std::mem::take(&mut self.inner.slice);
 
         let total_chunks = (slice.len() / chunk_size).min(self.other.size_hint().0);
-
         if total_chunks == 0 {
             return;
         }
@@ -198,9 +186,7 @@ where
             return;
         }
 
-        // Only here do we pay for the allocation — threading is confirmed needed.
         let others: Vec<I::Item> = self.other.take(total_chunks).collect();
-        let chunks_per_group = group_size / chunk_size;
 
         thread::scope(|s| {
             let job = Arc::new(f);
@@ -208,35 +194,20 @@ where
             let cores_len = cores.len().max(1);
 
             let mut others_iter = others.into_iter();
-            let mut grouped_others: Vec<Vec<I::Item>> = Vec::new();
-            loop {
-                let group: Vec<I::Item> = others_iter.by_ref().take(chunks_per_group).collect();
-                if group.is_empty() {
-                    break;
-                }
-                grouped_others.push(group);
-            }
 
-            let mut slice_chunks = slice.chunks_mut(group_size);
-            let first_slice_group = slice_chunks.next();
-            let first_others_group = if !grouped_others.is_empty() {
-                Some(grouped_others.swap_remove(0))
-            } else {
-                None
-            };
+            let first_group_len = group_size.min(slice.len());
+            let (first_group, remaining) = slice.split_at_mut(first_group_len);
 
-            let first_group_chunks = first_slice_group
-                .as_ref()
-                .map(|g| g.len() / chunk_size)
-                .unwrap_or(0);
+            let first_n = first_group_len / chunk_size;
+            let mut base_offset = first_n;
 
-            let mut base_offset = first_group_chunks;
+            for slice_group in remaining.chunks_mut(group_size) {
+                let n = slice_group.len() / chunk_size;
+                let group_items: Vec<I::Item> = others_iter.by_ref().take(n).collect();
 
-            for (slice_group, others_group) in slice_chunks.zip(grouped_others) {
                 let offset = CORE_RING_INDEX.fetch_add(1, Ordering::Relaxed);
                 let job = Arc::clone(&job);
                 let core = cores.get(offset % cores_len).cloned();
-                let local_count = slice_group.len() / chunk_size;
                 let copied_base = base_offset;
 
                 s.spawn(move || {
@@ -245,20 +216,22 @@ where
                     }
                     for (i, (chunk, item)) in slice_group
                         .chunks_exact_mut(chunk_size)
-                        .zip(others_group)
+                        .zip(group_items)
                         .enumerate()
                     {
                         job(copied_base + i, (chunk, item));
                     }
                 });
 
-                base_offset += local_count;
+                base_offset += n;
             }
 
-            if let (Some(sg), Some(og)) = (first_slice_group, first_others_group) {
-                for (i, (chunk, item)) in sg.chunks_exact_mut(chunk_size).zip(og).enumerate() {
-                    job(i, (chunk, item));
-                }
+            for (i, (chunk, item)) in first_group
+                .chunks_exact_mut(chunk_size)
+                .zip(others_iter.by_ref().take(first_n))
+                .enumerate()
+            {
+                job(i, (chunk, item));
             }
         });
     }
@@ -293,5 +266,302 @@ where
             other: self.other,
         }
         .for_each_enumerated(pool, f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{ChunksExactMut, ParallelZonedIterator, ThreadPool};
+    use std::sync::{Arc, Mutex};
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    fn pool(n: usize) -> ThreadPool {
+        ThreadPool { amount: n }
+    }
+
+    /// Collect (chunk_index, chunk_value, paired_item) for every invocation of
+    /// `for_each_enumerated`, then sort by index so tests can assert on order.
+    fn collect_enumerated(
+        data: &mut [u32],
+        chunk_size: usize,
+        items: Vec<u32>,
+        pool: &ThreadPool,
+    ) -> Vec<(usize, Vec<u32>, u32)> {
+        let results: Arc<Mutex<Vec<(usize, Vec<u32>, u32)>>> = Arc::new(Mutex::new(Vec::new()));
+        let r2 = Arc::clone(&results);
+
+        ChunksExactMut::new(chunk_size, data)
+            .zip(items.into_iter())
+            .for_each_enumerated(pool, move |idx, (chunk, item)| {
+                r2.lock().unwrap().push((idx, chunk.to_vec(), item));
+            });
+
+        let mut out = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
+        out.sort_by_key(|(i, _, _)| *i);
+        out
+    }
+
+    /// Collect (chunk_value, paired_item) for `for_each`, then sort by first
+    /// element of the chunk so order-sensitive assertions are stable.
+    fn collect_unordered(
+        data: &mut [u32],
+        chunk_size: usize,
+        items: Vec<u32>,
+        pool: &ThreadPool,
+    ) -> Vec<(Vec<u32>, u32)> {
+        let results: Arc<Mutex<Vec<(Vec<u32>, u32)>>> = Arc::new(Mutex::new(Vec::new()));
+        let r2 = Arc::clone(&results);
+
+        ChunksExactMut::new(chunk_size, data)
+            .zip(items.into_iter())
+            .for_each(pool, move |(chunk, item)| {
+                r2.lock().unwrap().push((chunk.to_vec(), item));
+            });
+
+        let mut out = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
+        out.sort_by_key(|(c, _)| c[0]);
+        out
+    }
+
+    // ── basic single-thread (pool.amount == 1) ────────────────────────────
+
+    #[test]
+    fn single_thread_for_each_visits_all_pairs() {
+        let mut data = vec![10u32, 20, 30, 40, 50, 60];
+        let items = vec![1u32, 2, 3];
+        let got = collect_unordered(&mut data, 2, items, &pool(1));
+
+        assert_eq!(
+            got,
+            vec![(vec![10, 20], 1), (vec![30, 40], 2), (vec![50, 60], 3),]
+        );
+    }
+
+    #[test]
+    fn single_thread_for_each_enumerated_indices_are_0_1_2() {
+        let mut data = vec![10u32, 20, 30, 40, 50, 60];
+        let items = vec![100u32, 200, 300];
+        let got = collect_enumerated(&mut data, 2, items, &pool(1));
+
+        let indices: Vec<usize> = got.iter().map(|(i, _, _)| *i).collect();
+        assert_eq!(indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn single_thread_enumerated_chunk_item_pairing_correct() {
+        let mut data = vec![1u32, 2, 3, 4, 5, 6];
+        let items = vec![10u32, 20, 30];
+        let got = collect_enumerated(&mut data, 2, items, &pool(1));
+
+        assert_eq!(got[0], (0, vec![1, 2], 10));
+        assert_eq!(got[1], (1, vec![3, 4], 20));
+        assert_eq!(got[2], (2, vec![5, 6], 30));
+    }
+
+    // ── empty / edge cases ────────────────────────────────────────────────
+
+    #[test]
+    fn empty_slice_does_nothing() {
+        let mut data: Vec<u32> = vec![];
+        let items = vec![1u32, 2];
+        let got = collect_enumerated(&mut data, 2, items, &pool(4));
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn single_chunk_single_item() {
+        let mut data = vec![42u32, 43];
+        let items = vec![99u32];
+        let got = collect_enumerated(&mut data, 2, items, &pool(4));
+        assert_eq!(got, vec![(0, vec![42, 43], 99)]);
+    }
+
+    #[test]
+    fn remainder_elements_are_ignored_like_chunks_exact() {
+        // 7 elements with chunk_size 2 → 3 chunks processed, 1 element ignored
+        let mut data = vec![1u32, 2, 3, 4, 5, 6, 7];
+        let items = vec![10u32, 20, 30, 40]; // 4 items but only 3 chunks fit
+        let got = collect_enumerated(&mut data, 2, items, &pool(1));
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[2].0, 2);
+    }
+
+    #[test]
+    fn fewer_items_than_chunks_limits_output() {
+        // zip stops at the shorter of the two
+        let mut data = vec![1u32, 2, 3, 4, 5, 6];
+        let items = vec![10u32, 20]; // only 2 items despite 3 chunks
+        let got = collect_enumerated(&mut data, 2, items, &pool(4));
+        assert_eq!(got.len(), 2);
+    }
+
+    // ── multi-thread index correctness ────────────────────────────────────
+
+    #[test]
+    fn multi_thread_indices_are_contiguous_0_to_n() {
+        let n = 20usize;
+        let mut data: Vec<u32> = (0..n as u32 * 2).collect();
+        let items: Vec<u32> = (0..n as u32).collect();
+
+        let got = collect_enumerated(&mut data, 2, items, &pool(4));
+
+        assert_eq!(got.len(), n);
+        let indices: Vec<usize> = got.iter().map(|(i, _, _)| *i).collect();
+        let expected: Vec<usize> = (0..n).collect();
+        assert_eq!(
+            indices, expected,
+            "indices must be 0..n with no gaps or duplicates"
+        );
+    }
+
+    #[test]
+    fn multi_thread_each_index_appears_exactly_once() {
+        let n = 16usize;
+        let mut data: Vec<u32> = (0..n as u32 * 3).collect();
+        let items: Vec<u32> = (0..n as u32).collect();
+
+        let got = collect_enumerated(&mut data, 3, items, &pool(4));
+
+        assert_eq!(got.len(), n);
+        for expected_idx in 0..n {
+            let count = got.iter().filter(|(i, _, _)| *i == expected_idx).count();
+            assert_eq!(count, 1, "index {expected_idx} should appear exactly once");
+        }
+    }
+
+    #[test]
+    fn multi_thread_index_zero_corresponds_to_first_chunk() {
+        let mut data: Vec<u32> = (0..20).collect();
+        let items: Vec<u32> = (100..110).collect();
+
+        let got = collect_enumerated(&mut data, 2, items, &pool(4));
+
+        // After sorting by index, index 0 must pair with data[0..2] and items[0]
+        let (idx, chunk, item) = &got[0];
+        assert_eq!(*idx, 0);
+        assert_eq!(chunk, &vec![0u32, 1]);
+        assert_eq!(*item, 100u32);
+    }
+
+    #[test]
+    fn multi_thread_index_n_minus_1_corresponds_to_last_chunk() {
+        let n = 10usize;
+        let mut data: Vec<u32> = (0..n as u32 * 2).collect();
+        let items: Vec<u32> = (0..n as u32).collect();
+
+        let got = collect_enumerated(&mut data, 2, items, &pool(4));
+
+        let (idx, chunk, item) = got.last().unwrap();
+        assert_eq!(*idx, n - 1);
+        assert_eq!(chunk[0], (n as u32 - 1) * 2);
+        assert_eq!(*item, n as u32 - 1);
+    }
+
+    // ── chunk↔item pairing integrity ─────────────────────────────────────
+
+    #[test]
+    fn every_chunk_is_paired_with_its_matching_item_multi_thread() {
+        // chunk i contains [i*2, i*2+1], item i = i*100
+        // After sort-by-index we can verify the pairing at every position.
+        let n = 24usize;
+        let mut data: Vec<u32> = (0..n as u32 * 2).collect();
+        let items: Vec<u32> = (0..n as u32).map(|i| i * 100).collect();
+
+        let got = collect_enumerated(&mut data, 2, items, &pool(6));
+
+        for (idx, chunk, item) in &got {
+            let expected_chunk = vec![*idx as u32 * 2, *idx as u32 * 2 + 1];
+            let expected_item = *idx as u32 * 100;
+            assert_eq!(chunk, &expected_chunk, "chunk at index {idx} mismatch");
+            assert_eq!(*item, expected_item, "item at index {idx} mismatch");
+        }
+    }
+
+    // ── zip_exact variant ─────────────────────────────────────────────────
+
+    #[test]
+    fn zip_exact_produces_same_result_as_zip() {
+        let n = 12usize;
+        let mut data1: Vec<u32> = (0..n as u32 * 2).collect();
+        let mut data2 = data1.clone();
+        let items: Vec<u32> = (0..n as u32).collect();
+
+        let mut got_zip = collect_enumerated(&mut data1, 2, items.clone(), &pool(4));
+        got_zip.sort_by_key(|(i, _, _)| *i);
+
+        // zip_exact
+        let results: Arc<Mutex<Vec<(usize, Vec<u32>, u32)>>> = Arc::new(Mutex::new(Vec::new()));
+        let r2 = Arc::clone(&results);
+        ChunksExactMut::new(2, &mut data2)
+            .zip_exact(items.into_iter())
+            .for_each_enumerated(&pool(4), move |idx, (chunk, item)| {
+                r2.lock().unwrap().push((idx, chunk.to_vec(), item));
+            });
+        let mut got_exact = Arc::try_unwrap(results).unwrap().into_inner().unwrap();
+        got_exact.sort_by_key(|(i, _, _)| *i);
+
+        assert_eq!(got_zip, got_exact);
+    }
+
+    #[test]
+    #[should_panic(expected = "zip_exact")]
+    fn zip_exact_panics_on_length_mismatch() {
+        let mut data = vec![0u32; 8];
+        let items = vec![1u32, 2, 3]; // 4 chunks but only 3 items
+        ChunksExactMut::new(2, &mut data).zip_exact(items.into_iter());
+    }
+
+    // ── mutations are visible after for_each ─────────────────────────────
+
+    #[test]
+    fn for_each_mutations_applied_to_original_slice() {
+        let mut data = vec![0u32; 8];
+        let items = vec![10u32, 20, 30, 40];
+
+        ChunksExactMut::new(2, &mut data)
+            .zip(items.into_iter())
+            .for_each(&pool(2), |(chunk, item)| {
+                for v in chunk.iter_mut() {
+                    *v = item;
+                }
+            });
+
+        assert_eq!(data, vec![10, 10, 20, 20, 30, 30, 40, 40]);
+    }
+
+    #[test]
+    fn for_each_mutations_applied_multi_thread() {
+        let n = 20usize;
+        let mut data = vec![0u32; n * 2];
+        let items: Vec<u32> = (0..n as u32).map(|i| i + 1).collect();
+
+        ChunksExactMut::new(2, &mut data)
+            .zip(items.into_iter())
+            .for_each(&pool(4), |(chunk, item)| {
+                chunk[0] = item;
+                chunk[1] = item * 10;
+            });
+
+        for i in 0..n {
+            assert_eq!(data[i * 2], (i as u32) + 1);
+            assert_eq!(data[i * 2 + 1], ((i as u32) + 1) * 10);
+        }
+    }
+
+    // ── stress: many threads, large workload ──────────────────────────────
+
+    #[test]
+    fn stress_indices_unique_and_contiguous_large() {
+        let n = 200usize;
+        let mut data: Vec<u32> = (0..n as u32 * 4).collect();
+        let items: Vec<u32> = (0..n as u32).collect();
+
+        let got = collect_enumerated(&mut data, 4, items, &pool(8));
+
+        assert_eq!(got.len(), n);
+        let indices: Vec<usize> = got.iter().map(|(i, _, _)| *i).collect();
+        let expected: Vec<usize> = (0..n).collect();
+        assert_eq!(indices, expected);
     }
 }
