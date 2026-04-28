@@ -28,9 +28,11 @@
  */
 #![deny(clippy::float_arithmetic)]
 
+mod range;
 mod zip;
 mod zip_exact;
 
+pub use range::{parallel_range, parallel_range_with_context};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -123,6 +125,14 @@ impl<'data, T: Send> ChunksExactMut<'data, T> {
         self
     }
 
+    pub fn len(&self) -> usize {
+        self.slice.len() / self.chunk_size
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slice.is_empty()
+    }
+
     /// Return the remainder of the original slice that is not going to be
     /// returned by the iterator. The returned slice has at most `chunk_size-1`
     /// elements.
@@ -177,6 +187,14 @@ impl<'data, T: Send> ChunksMut<'data, T> {
         self.slice = &mut self.slice[skip_len..];
         self
     }
+
+    pub fn len(&self) -> usize {
+        self.slice.len().div_ceil(self.chunk_size)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slice.is_empty()
+    }
 }
 
 pub trait TbSliceMut<T: Send> {
@@ -219,6 +237,21 @@ pub trait ParallelZonedIterator: Sized + Send {
     fn for_each_enumerated<'scope, F>(self, thread_pool: &ThreadPool, f: F)
     where
         F: 'scope + Fn(usize, Self::Item) + Send + Sync;
+    fn for_each_with_context<'scope, F, C, CF>(self, pool: &ThreadPool, make_context: CF, f: F)
+    where
+        F: 'scope + Fn(&mut C, Self::Item) + Send + Sync,
+        C: Send,
+        CF: Fn() -> C + Send + Sync;
+
+    fn for_each_enumerated_with_context<'scope, F, C, CF>(
+        self,
+        pool: &ThreadPool,
+        make_context: CF,
+        f: F,
+    ) where
+        F: 'scope + Fn(usize, &mut C, Self::Item) + Send + Sync,
+        C: Send,
+        CF: Fn() -> C + Send + Sync;
 }
 
 fn odd_rounding_div_ceil(rows_to_execute: usize, threads: usize, chunk_size: usize) -> usize {
@@ -376,6 +409,150 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksExactMut<'data, T> {
             }
         });
     }
+
+    fn for_each_with_context<'scope, F, C, CF>(mut self, pool: &ThreadPool, make_context: CF, f: F)
+    where
+        F: 'scope + Fn(&mut C, Self::Item) + Send + Sync,
+        C: Send,
+        CF: Fn() -> C + Send + Sync,
+    {
+        if self.slice.is_empty() {
+            return;
+        }
+        if pool.amount <= 1 {
+            let mut ctx = make_context();
+            for chunk in self.slice.chunks_exact_mut(self.chunk_size) {
+                f(&mut ctx, chunk);
+            }
+            return;
+        }
+        let chunk_size = self.chunk_size;
+        let slice = std::mem::take(&mut self.slice);
+        let total_chunks = (slice.len() / chunk_size).max(1);
+        let rows_to_execute = total_chunks * chunk_size;
+        let group_size = odd_rounding_div_ceil(rows_to_execute, pool.amount, chunk_size);
+
+        if group_size == rows_to_execute {
+            let mut ctx = make_context();
+            for chunk in slice.chunks_exact_mut(chunk_size) {
+                f(&mut ctx, chunk);
+            }
+            return;
+        }
+
+        thread::scope(|s| {
+            let job = Arc::new(f);
+            let make_context = Arc::new(make_context);
+            let cores = core_affinity::get_core_ids().unwrap_or_default();
+            let cores_len = cores.len().max(1);
+
+            let mut chunks = slice.chunks_mut(group_size);
+            let first_group = chunks.next();
+
+            for chunk in chunks {
+                let offset = CORE_RING_INDEX.fetch_add(1, Ordering::Relaxed);
+                let job = Arc::clone(&job);
+                let make_context = Arc::clone(&make_context);
+                let core = cores.get(offset % cores_len).cloned();
+
+                s.spawn(move || {
+                    if let Some(core_id) = core {
+                        core_affinity::set_for_current(core_id);
+                    }
+                    let mut ctx = make_context();
+                    for chunk in chunk.chunks_exact_mut(chunk_size) {
+                        job(&mut ctx, chunk);
+                    }
+                });
+            }
+
+            if let Some(first_group) = first_group {
+                let mut ctx = make_context();
+                for chunk in first_group.chunks_exact_mut(chunk_size) {
+                    job(&mut ctx, chunk);
+                }
+            }
+        });
+    }
+
+    fn for_each_enumerated_with_context<'scope, F, C, CF>(
+        mut self,
+        pool: &ThreadPool,
+        make_context: CF,
+        f: F,
+    ) where
+        F: 'scope + Fn(usize, &mut C, Self::Item) + Send + Sync,
+        C: Send,
+        CF: Fn() -> C + Send + Sync,
+    {
+        if self.slice.is_empty() {
+            return;
+        }
+        if pool.amount <= 1 {
+            let mut ctx = make_context();
+            for (i, chunk) in self.slice.chunks_exact_mut(self.chunk_size).enumerate() {
+                f(i, &mut ctx, chunk);
+            }
+            return;
+        }
+        let chunk_size = self.chunk_size;
+        let slice = std::mem::take(&mut self.slice);
+        let total_chunks = (slice.len() / chunk_size).max(1);
+        let rows_to_execute = total_chunks * chunk_size;
+        let group_size = odd_rounding_div_ceil(rows_to_execute, pool.amount, chunk_size);
+
+        if group_size == rows_to_execute {
+            let mut ctx = make_context();
+            for (i, chunk) in slice.chunks_exact_mut(chunk_size).enumerate() {
+                f(i, &mut ctx, chunk);
+            }
+            return;
+        }
+
+        thread::scope(|s| {
+            let job = Arc::new(f);
+            let make_context = Arc::new(make_context);
+            let cores = core_affinity::get_core_ids().unwrap_or_default();
+            let cores_len = cores.len().max(1);
+
+            let mut chunks = slice.chunks_mut(group_size);
+            let first_group = chunks.next();
+
+            let mut base_offset = if let Some(fg) = &first_group {
+                fg.len() / chunk_size
+            } else {
+                0
+            };
+
+            for chunk in chunks {
+                let offset = CORE_RING_INDEX.fetch_add(1, Ordering::Relaxed);
+                let job = Arc::clone(&job);
+                let make_context = Arc::clone(&make_context);
+                let core = cores.get(offset % cores_len).cloned();
+                let local_chunk_size = chunk.len() / chunk_size;
+                let copied_base = base_offset;
+
+                s.spawn(move || {
+                    if let Some(core_id) = core {
+                        core_affinity::set_for_current(core_id);
+                    }
+                    let mut ctx = make_context();
+                    for (i, chunk) in chunk.chunks_exact_mut(chunk_size).enumerate() {
+                        job(copied_base + i, &mut ctx, chunk);
+                    }
+                });
+
+                base_offset += local_chunk_size;
+            }
+
+            if let Some(first_group) = first_group {
+                let mut ctx = make_context();
+                for (i, chunk) in first_group.chunks_exact_mut(chunk_size).enumerate() {
+                    job(i, &mut ctx, chunk);
+                }
+            }
+        });
+    }
 }
 
 impl<'data, T: Send> ParallelZonedIterator for ChunksMut<'data, T> {
@@ -505,6 +682,150 @@ impl<'data, T: Send> ParallelZonedIterator for ChunksMut<'data, T> {
             if let Some(first_group) = first_group {
                 for (i, chunk) in first_group.chunks_mut(chunk_size).enumerate() {
                     job(i, chunk);
+                }
+            }
+        });
+    }
+
+    fn for_each_with_context<'scope, F, C, CF>(mut self, pool: &ThreadPool, make_context: CF, f: F)
+    where
+        F: 'scope + Fn(&mut C, Self::Item) + Send + Sync,
+        C: Send,
+        CF: Fn() -> C + Send + Sync,
+    {
+        if self.slice.is_empty() {
+            return;
+        }
+        if pool.amount <= 1 {
+            let mut ctx = make_context();
+            for chunk in self.slice.chunks_mut(self.chunk_size) {
+                f(&mut ctx, chunk);
+            }
+            return;
+        }
+        let chunk_size = self.chunk_size;
+        let slice = std::mem::take(&mut self.slice);
+        let total_chunks = (slice.len() / chunk_size).max(1);
+        let rows_to_execute = total_chunks * chunk_size;
+        let group_size = odd_rounding_div_ceil(rows_to_execute, pool.amount, chunk_size);
+
+        if group_size == rows_to_execute {
+            let mut ctx = make_context();
+            for chunk in slice.chunks_mut(chunk_size) {
+                f(&mut ctx, chunk);
+            }
+            return;
+        }
+
+        thread::scope(|s| {
+            let job = Arc::new(f);
+            let make_context = Arc::new(make_context);
+            let cores = core_affinity::get_core_ids().unwrap_or_default();
+            let cores_len = cores.len().max(1);
+
+            let mut chunks = slice.chunks_mut(group_size);
+            let first_group = chunks.next();
+
+            for chunk in chunks {
+                let offset = CORE_RING_INDEX.fetch_add(1, Ordering::Relaxed);
+                let job = Arc::clone(&job);
+                let make_context = Arc::clone(&make_context);
+                let core = cores.get(offset % cores_len).cloned();
+
+                s.spawn(move || {
+                    if let Some(core_id) = core {
+                        core_affinity::set_for_current(core_id);
+                    }
+                    let mut ctx = make_context();
+                    for chunk in chunk.chunks_mut(chunk_size) {
+                        job(&mut ctx, chunk);
+                    }
+                });
+            }
+
+            if let Some(first_group) = first_group {
+                let mut ctx = make_context();
+                for chunk in first_group.chunks_mut(chunk_size) {
+                    job(&mut ctx, chunk);
+                }
+            }
+        });
+    }
+
+    fn for_each_enumerated_with_context<'scope, F, C, CF>(
+        mut self,
+        pool: &ThreadPool,
+        make_context: CF,
+        f: F,
+    ) where
+        F: 'scope + Fn(usize, &mut C, Self::Item) + Send + Sync,
+        C: Send,
+        CF: Fn() -> C + Send + Sync,
+    {
+        if self.slice.is_empty() {
+            return;
+        }
+        if pool.amount <= 1 {
+            let mut ctx = make_context();
+            for (i, chunk) in self.slice.chunks_mut(self.chunk_size).enumerate() {
+                f(i, &mut ctx, chunk);
+            }
+            return;
+        }
+        let chunk_size = self.chunk_size;
+        let slice = std::mem::take(&mut self.slice);
+        let total_chunks = (slice.len() / chunk_size).max(1);
+        let rows_to_execute = total_chunks * chunk_size;
+        let group_size = odd_rounding_div_ceil(rows_to_execute, pool.amount, chunk_size);
+
+        if group_size == rows_to_execute {
+            let mut ctx = make_context();
+            for (i, chunk) in slice.chunks_mut(chunk_size).enumerate() {
+                f(i, &mut ctx, chunk);
+            }
+            return;
+        }
+
+        thread::scope(|s| {
+            let job = Arc::new(f);
+            let make_context = Arc::new(make_context);
+            let cores = core_affinity::get_core_ids().unwrap_or_default();
+            let cores_len = cores.len().max(1);
+
+            let mut chunks = slice.chunks_mut(group_size);
+            let first_group = chunks.next();
+
+            let mut base_offset = if let Some(fg) = &first_group {
+                fg.len() / chunk_size
+            } else {
+                0
+            };
+
+            for chunk in chunks {
+                let offset = CORE_RING_INDEX.fetch_add(1, Ordering::Relaxed);
+                let job = Arc::clone(&job);
+                let make_context = Arc::clone(&make_context);
+                let core = cores.get(offset % cores_len).cloned();
+                let local_chunk_size = chunk.len() / chunk_size;
+                let copied_base = base_offset;
+
+                s.spawn(move || {
+                    if let Some(core_id) = core {
+                        core_affinity::set_for_current(core_id);
+                    }
+                    let mut ctx = make_context();
+                    for (i, chunk) in chunk.chunks_mut(chunk_size).enumerate() {
+                        job(copied_base + i, &mut ctx, chunk);
+                    }
+                });
+
+                base_offset += local_chunk_size;
+            }
+
+            if let Some(first_group) = first_group {
+                let mut ctx = make_context();
+                for (i, chunk) in first_group.chunks_mut(chunk_size).enumerate() {
+                    job(i, &mut ctx, chunk);
                 }
             }
         });
